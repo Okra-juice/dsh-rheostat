@@ -1,0 +1,45 @@
+# 滑动变阻器（Rheostat）
+
+给 DeepSeek Harness 用的推理等级滑动变阻器：把输入框旁「模型」菜单里的推理等级列表换成一条滑块，拖到多少就用多少。
+
+- 插件包名：`dsh-rheostat`
+- 适用：DSH Web / 官方 Desktop（需要 `@deepseek-ai/dsh-client-ui-model-selection` 提供 `conversation.input.model` 插槽）
+
+## 功能
+
+- **滑块代替列表**：点「模型」按钮 → 「推理等级」，原来的 Off / Low / High / Max 列表变成一条滑块，拖动松手才提交，失败回弹。
+- **颜色随等级渐变**：轨道和滑钮从主题色逐渐过渡到蓝色，Max 为纯蓝 `#4d6bfe`；输入框上的推理等级文字同步变色。
+- **大肥鱼介绍**：滑块上方一行小字，跟着档位实时切换。
+- **一碗饭**：右侧画一只原创的棕色饭碗，Off 冒尖、逐级变少，Max 是空碗。
+- **Max 特效**：滑钮放大并带光晕，一串蓝色细线从滑钮向左飘满整条轨道。
+- **保留原生菜单**：模型列表、搜索、`/model` 命令都照常；只替换主面板里的模型选择组件。
+
+## 安装
+
+在 DSH 中安装这个插件包即可（插件市场 / 插件管理器按包名 `dsh-rheostat` 安装，或在 profile 里 link 本目录）。安装后刷新页面生效。
+
+本地开发时把它装进 profile：
+
+```text
+dsh plugin --profile <profile> add <本目录的绝对路径>
+```
+
+## 目录结构
+
+| 文件 | 说明 |
+| --- | --- |
+| `package.json` | 包清单，声明 `dsh.bundle.patch` 与 `dsh.client` |
+| `cordis.patch.yml` | 插入 `rheostat` 这一行插件 |
+| `index.js` | Host 端（空实现，渲染在浏览器端） |
+| `client.js` | 浏览器端：模型选择面板与滑块 |
+| `locale/zh.json`、`locale/en.json` | 插件管理器显示的标题与介绍 |
+| `icon.svg` | 插件图标 |
+
+## 已知限制
+
+- 推理等级列表是 DSH 内置模型选择组件的一部分，官方没有为它预留插槽，因此本插件整体替换了 `conversation.input.model`（`priority: -1`）并复刻了外观；宿主升级后若接口变化，可能退回原生菜单。
+- 只有当前模型提供 2 个及以上推理档位时才显示滑块。
+
+## License
+
+MIT

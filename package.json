@@ -1,0 +1,50 @@
+{
+  "name": "dsh-rheostat",
+  "version": "1.7.4",
+  "private": true,
+  "type": "module",
+  "description": "A rheostat for the model's reasoning level in the composer model menu.",
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "reasoning-effort",
+    "slider"
+  ],
+  "license": "MIT",
+  "author": "Okra-juice",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Okra-juice/dsh-rheostat.git"
+  },
+  "homepage": "https://github.com/Okra-juice/dsh-rheostat#readme",
+  "bugs": {
+    "url": "https://github.com/Okra-juice/dsh-rheostat/issues"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-model-selection"
+      ]
+    }
+  }
+}
