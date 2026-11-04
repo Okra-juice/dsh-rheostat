@@ -1095,8 +1095,80 @@ window.__ModuleLoader__.load({
 
     const EMPTY_STATE = { current: null, groups: [], status: 'idle', pending: null, failures: [] };
 
+    /**
+     * Visible stand-in for the model seat while the session's model directory
+     * cannot be resolved yet (a cold session, a slow connection). It retries on
+     * click and the wrapper retries in the background, so the composer never
+     * loses its model button to a transient failure.
+     */
+    function FallbackSeat({ t, onRetry }) {
+      return h('button', {
+        type: 'button',
+        className: 'rgs-trigger',
+        title: t('trigger.fallback'),
+        onClick: onRetry,
+      },
+      h(IconData, { className: 'rgs-triggerIcon' }),
+      h('span', { className: 'rgs-triggerLabel' }, t('trigger.fallback')),
+      h(IconChevronDown, { className: 'rgs-chevron' }));
+    }
+
     function ModelSeat(props) {
-      const { locked, available, directory, load, select, renderSlot } = props;
+      const { available, directory, resolve } = props;
+      const t = typeof props.t === 'function' ? props.t : (key) => key;
+      const [store, setStore] = useState(directory || null);
+
+      useEffect(() => {
+        if (directory) setStore(directory);
+      }, [directory]);
+
+      useEffect(() => {
+        if (!available || store) return undefined;
+        let cancelled = false;
+        let timer = 0;
+        let attempts = 0;
+        const tick = () => {
+          if (cancelled) return;
+          let next = null;
+          try {
+            next = typeof resolve === 'function' ? resolve() : null;
+          } catch {
+            next = null;
+          }
+          if (next) {
+            setStore(next);
+            return;
+          }
+          attempts += 1;
+          if (attempts < 60) timer = setTimeout(tick, 500);
+        };
+        timer = setTimeout(tick, 200);
+        return () => {
+          cancelled = true;
+          clearTimeout(timer);
+        };
+      }, [available, store, resolve]);
+
+      if (!available) return null;
+      if (!store) {
+        return h(FallbackSeat, {
+          t,
+          onRetry: () => {
+            let next = null;
+            try {
+              next = typeof resolve === 'function' ? resolve() : null;
+            } catch {
+              next = null;
+            }
+            if (next) setStore(next);
+          },
+        });
+      }
+      return h(SeatView, { ...props, directory: store });
+    }
+
+    function SeatView(props) {
+      const { locked, directory, load, select, renderSlot } = props;
       const t = typeof props.t === 'function' ? props.t : (key) => key;
       const state = useSyncExternalStore(
         (listener) => (directory ? directory.subscribe(listener) : () => {}),
@@ -1212,7 +1284,7 @@ window.__ModuleLoader__.load({
         };
       }, [open, pane, query]);
 
-      if (!available || !directory) return null;
+      if (!directory) return null;
 
       const show = () => {
         setError(null);
@@ -1561,12 +1633,6 @@ window.__ModuleLoader__.load({
           // unloading this plugin.
           priority: -1,
           inject: (sessionId) => {
-            let directory;
-            try {
-              directory = ctx.modelDirectories.directoryFor(sessionId);
-            } catch {
-              return { available: false };
-            }
             let available = true;
             try {
               const sessions = ctx.sessions;
@@ -1576,15 +1642,35 @@ window.__ModuleLoader__.load({
             } catch {
               available = true;
             }
+
+            const currentDirectory = () => {
+              try {
+                return ctx.modelDirectories.directoryFor(sessionId) || null;
+              } catch {
+                return null;
+              }
+            };
+
+            const resolve = () => {
+              if (!available) return null;
+              const directory = currentDirectory();
+              return directory && directory.store ? directory.store : null;
+            };
+
             return {
               available,
-              directory: directory.store,
+              directory: resolve(),
+              resolve,
               load: () => {
                 if (!available) return;
+                const directory = currentDirectory();
+                if (!directory) return;
                 Promise.resolve(directory.load()).catch(() => {});
               },
               select: (selection) => {
                 if (!available) return Promise.resolve(undefined);
+                const directory = currentDirectory();
+                if (!directory) return Promise.resolve(undefined);
                 try {
                   return directory.select(selection);
                 } catch (failure) {
