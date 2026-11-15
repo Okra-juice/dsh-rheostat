@@ -1095,6 +1095,13 @@ window.__ModuleLoader__.load({
 
     const EMPTY_STATE = { current: null, groups: [], status: 'idle', pending: null, failures: [] };
 
+    /* Resolution pacing: start fast enough to win a cold-start race, back off to
+       a steady poll so a slow session still recovers, and finally hand the seat
+       back to the built-in selector rather than leaving a dead trigger. */
+    const RESOLVE_DELAY_MIN = 150;
+    const RESOLVE_DELAY_MAX = 2000;
+    const RESOLVE_GIVE_UP_ATTEMPTS = 40;
+
     /**
      * Visible stand-in for the model seat while the session's model directory
      * cannot be resolved yet (a cold session, a slow connection). It retries on
@@ -1105,62 +1112,85 @@ window.__ModuleLoader__.load({
       return h('button', {
         type: 'button',
         className: 'rgs-trigger',
-        title: t('trigger.fallback'),
+        title: t('trigger.connecting'),
         onClick: onRetry,
       },
       h(IconData, { className: 'rgs-triggerIcon' }),
-      h('span', { className: 'rgs-triggerLabel' }, t('trigger.fallback')),
-      h(IconChevronDown, { className: 'rgs-chevron' }));
+      h('span', { className: 'rgs-triggerLabel' }, t('trigger.connecting')),
+      h('span', { className: 'rgs-spinner', 'aria-hidden': true }));
     }
 
     function ModelSeat(props) {
-      const { available, directory, resolve } = props;
+      const { available, directory, resolve, load } = props;
       const t = typeof props.t === 'function' ? props.t : (key) => key;
       const [store, setStore] = useState(directory || null);
+      const [probes, setProbes] = useState(0);
+      const [reason, setReason] = useState(null);
 
       useEffect(() => {
         if (directory) setStore(directory);
       }, [directory]);
 
+      /* The slot's inject result is cached per session scope, so the first read
+         can land before the client session binding exists. A failed read there
+         is a transient composition state, not a verdict: re-read it until the
+         directory shows up instead of latching onto the placeholder. */
       useEffect(() => {
         if (!available || store) return undefined;
         let cancelled = false;
         let timer = 0;
+        let delay = RESOLVE_DELAY_MIN;
         let attempts = 0;
         const tick = () => {
           if (cancelled) return;
-          let next = null;
+          let outcome = null;
           try {
-            next = typeof resolve === 'function' ? resolve() : null;
-          } catch {
-            next = null;
+            outcome = typeof resolve === 'function' ? resolve() : null;
+          } catch (failure) {
+            outcome = { store: null, error: failure instanceof Error ? failure.message : String(failure) };
           }
-          if (next) {
-            setStore(next);
+          if (outcome && outcome.store) {
+            setReason(null);
+            setStore(outcome.store);
             return;
           }
           attempts += 1;
-          if (attempts < 60) timer = setTimeout(tick, 500);
+          setProbes(attempts);
+          setReason(outcome?.error ?? 'unresolved');
+          delay = Math.min(RESOLVE_DELAY_MAX, Math.round(delay * 1.6));
+          timer = setTimeout(tick, delay);
         };
-        timer = setTimeout(tick, 200);
+        timer = setTimeout(tick, 0);
         return () => {
           cancelled = true;
           clearTimeout(timer);
         };
       }, [available, store, resolve]);
 
+      /* Reading the directory once is what asks the Host for the model catalog;
+         without this the trigger can sit on an idle catalog forever. */
+      useEffect(() => {
+        if (store) load?.();
+      }, [store, load]);
+
       if (!available) return null;
       if (!store) {
+        if (probes >= RESOLVE_GIVE_UP_ATTEMPTS) {
+          /* Shadowing the shipped seat only earns its keep while this one can
+             actually read the session's directory. Failing that, abdicate so the
+             composer regains the built-in selector. */
+          throw new Error(`dsh-rheostat: model directory unavailable (${reason ?? 'unknown'})`);
+        }
         return h(FallbackSeat, {
           t,
           onRetry: () => {
-            let next = null;
+            let outcome = null;
             try {
-              next = typeof resolve === 'function' ? resolve() : null;
-            } catch {
-              next = null;
+              outcome = typeof resolve === 'function' ? resolve() : null;
+            } catch (failure) {
+              outcome = { store: null, error: failure instanceof Error ? failure.message : String(failure) };
             }
-            if (next) setStore(next);
+            if (outcome && outcome.store) setStore(outcome.store);
           },
         });
       }
@@ -1284,6 +1314,31 @@ window.__ModuleLoader__.load({
         };
       }, [open, pane, query]);
 
+      /* A cold client can reach the model catalog before the Host generation is
+         ready; the shared catalog then stays failed until somebody asks again
+         and the trigger reads "Select model" forever. Ask again in the
+         background so the seat recovers on its own. */
+      const catalogStatus = state.status;
+      useEffect(() => {
+        if (catalogStatus !== 'error' && catalogStatus !== 'idle') return undefined;
+        let cancelled = false;
+        let timer = 0;
+        let delay = 700;
+        let tries = 0;
+        const retry = () => {
+          if (cancelled || tries >= 8) return;
+          tries += 1;
+          load();
+          delay = Math.min(8000, Math.round(delay * 1.8));
+          timer = setTimeout(retry, delay);
+        };
+        timer = setTimeout(retry, delay);
+        return () => {
+          cancelled = true;
+          clearTimeout(timer);
+        };
+      }, [catalogStatus, load]);
+
       if (!directory) return null;
 
       const show = () => {
@@ -1365,8 +1420,19 @@ window.__ModuleLoader__.load({
         close();
       };
 
-      const waiting = currentChoice === undefined && state.status === 'loading';
-      const modelLabel = waiting ? t('trigger.loading') : currentChoice ? currentChoice.model.name : t('trigger.fallback');
+      const waiting = currentChoice === undefined && (state.status === 'loading' || state.status === 'idle');
+      const failing = currentChoice === undefined && state.status === 'error';
+      /* A known selection whose catalog entry has not arrived yet still names
+         the model the session will use, which beats a bare placeholder. */
+      const modelLabel = waiting
+        ? t('trigger.loading')
+        : currentChoice
+          ? currentChoice.model.name
+          : failing
+            ? t('trigger.failed')
+            : state.current
+              ? state.current.model
+              : t('trigger.fallback');
       const triggerText = effortLabel === undefined ? modelLabel : `${modelLabel} · ${effortLabel}`;
       const currentEffortIndex = reasoning === undefined
         ? -1
@@ -1377,7 +1443,9 @@ window.__ModuleLoader__.load({
       const triggerAria = waiting
         ? t('trigger.loading')
         : currentChoice === undefined
-          ? t('trigger.fallback')
+          ? failing
+            ? t('trigger.failed')
+            : t('trigger.fallback')
           : effortLabel === undefined
             ? t('trigger.modelAria', { model: modelLabel })
             : t('trigger.aria', { model: modelLabel, effort: effortLabel });
@@ -1569,6 +1637,8 @@ window.__ModuleLoader__.load({
                 'provider.account': 'DeepSeek 账号',
                 'trigger.fallback': '请选择模型',
                 'trigger.loading': '正在加载模型…',
+                'trigger.connecting': '正在连接模型服务…',
+                'trigger.failed': '模型列表加载失败',
                 'trigger.modelAria': '选择模型，当前 {model}',
                 'trigger.aria': '选择模型，当前 {model}，推理等级 {effort}',
                 'menu.aria': '模型与推理等级',
@@ -1594,6 +1664,8 @@ window.__ModuleLoader__.load({
                 'provider.account': 'DeepSeek Account',
                 'trigger.fallback': 'Select model',
                 'trigger.loading': 'Loading models…',
+                'trigger.connecting': 'Connecting to the model service…',
+                'trigger.failed': 'Model list failed to load',
                 'trigger.modelAria': 'Select model, current {model}',
                 'trigger.aria': 'Select model, current {model}, reasoning effort {effort}',
                 'menu.aria': 'Model and reasoning effort',
@@ -1643,33 +1715,56 @@ window.__ModuleLoader__.load({
               available = true;
             }
 
-            const currentDirectory = () => {
+            /* The service is read through the live context on every probe: a
+               cached reference outlives a Host generation reset, the getter
+               does not. */
+            const serviceOf = () => {
               try {
-                return ctx.modelDirectories.directoryFor(sessionId) || null;
+                if (ctx.modelDirectories) return ctx.modelDirectories;
               } catch {
-                return null;
+                // Fall through to the explicit lookup below.
+              }
+              try {
+                return typeof ctx.get === 'function' ? ctx.get('modelDirectories') : undefined;
+              } catch {
+                return undefined;
+              }
+            };
+
+            const currentDirectory = () => {
+              const service = serviceOf();
+              if (!service) return { directory: null, error: 'modelDirectories service unavailable' };
+              try {
+                return { directory: service.directoryFor(sessionId) || null, error: null };
+              } catch (failure) {
+                return {
+                  directory: null,
+                  error: failure instanceof Error ? failure.message : String(failure),
+                };
               }
             };
 
             const resolve = () => {
-              if (!available) return null;
-              const directory = currentDirectory();
-              return directory && directory.store ? directory.store : null;
+              if (!available) return { store: null, error: 'session is not selectable' };
+              const { directory, error } = currentDirectory();
+              if (!directory) return { store: null, error: error ?? 'no directory for this session' };
+              if (!directory.store) return { store: null, error: 'directory exposes no store' };
+              return { store: directory.store, error: null };
             };
 
             return {
               available,
-              directory: resolve(),
+              directory: resolve().store,
               resolve,
               load: () => {
                 if (!available) return;
-                const directory = currentDirectory();
+                const { directory } = currentDirectory();
                 if (!directory) return;
                 Promise.resolve(directory.load()).catch(() => {});
               },
               select: (selection) => {
                 if (!available) return Promise.resolve(undefined);
-                const directory = currentDirectory();
+                const { directory } = currentDirectory();
                 if (!directory) return Promise.resolve(undefined);
                 try {
                   return directory.select(selection);

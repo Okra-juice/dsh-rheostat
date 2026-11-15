@@ -1,6 +1,6 @@
 {
   "name": "dsh-rheostat",
-  "version": "1.7.5",
+  "version": "1.7.6",
   "private": true,
   "type": "module",
   "description": "A rheostat for the model's reasoning level in the composer model menu.",
