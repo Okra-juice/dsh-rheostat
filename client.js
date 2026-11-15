@@ -1700,6 +1700,9 @@ window.__ModuleLoader__.load({
         ctx.slots.inject(SLOT, () => ctx.slots.register({
           name: SLOT,
           locale: NS,
+          // Stamped so `cordis_inspect_query` on this slot reports which build
+          // is actually mounted instead of the surrounding bundle's id.
+          registrant: 'dsh-rheostat 1.7.6',
           // The shipped model seat registers at priority 0; the lowest
           // priority renders, so -1 shadows it and restoring it is just
           // unloading this plugin.
